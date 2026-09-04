@@ -31,14 +31,7 @@ from transformers.modeling_outputs import (
     QuestionAnsweringModelOutput,
     SequenceClassifierOutput,
 )
-from transformers.modeling_utils import PreTrainedModel
-
-def find_pruneable_heads_and_indices(heads, num_heads, head_size, already_pruned_heads):
-    return set(), None
-
-def prune_linear_layer(layer, index, dim=0):
-    return layer
-
+from transformers.modeling_utils import PreTrainedModel, find_pruneable_heads_and_indices, prune_linear_layer
 from transformers.models.roberta.modeling_roberta import (
     RobertaIntermediate,
     RobertaLMHead,
@@ -218,7 +211,6 @@ class LayoutLMv3PreTrainedModel(PreTrainedModel):
 
     config_class = LayoutLMv3Config
     base_model_prefix = "layoutlmv3"
-    all_tied_weights_keys = {}
 
     # Copied from transformers.models.bert.modeling_bert.BertPreTrainedModel._init_weights
     def _init_weights(self, module):
@@ -783,27 +775,10 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
         cls_token_box = torch.tensor([[0 + 1, 0 + 1, max_len - 1, max_len - 1]])
         self.visual_bbox = torch.cat([cls_token_box, visual_bbox], dim=0)
 
-    def _calc_visual_bbox(self, device, dtype, bsz, img_size=(14, 14), max_len=1000):
-        visual_bbox_x = torch.div(torch.arange(0, max_len * (img_size[1] + 1), max_len, device=device),
-                                  img_size[1], rounding_mode='trunc')
-        visual_bbox_y = torch.div(torch.arange(0, max_len * (img_size[0] + 1), max_len, device=device),
-                                  img_size[0], rounding_mode='trunc')
-        visual_bbox = torch.stack(
-            [
-                visual_bbox_x[:-1].repeat(img_size[0], 1),
-                visual_bbox_y[:-1].repeat(img_size[1], 1).transpose(0, 1),
-                visual_bbox_x[1:].repeat(img_size[0], 1),
-                visual_bbox_y[1:].repeat(img_size[1], 1).transpose(0, 1),
-            ],
-            dim=-1,
-        ).view(-1, 4)
-
-        cls_token_box = torch.tensor([[0 + 1, 0 + 1, max_len - 1, max_len - 1]], device=device, dtype=torch.long)
-        visual_bbox = torch.cat([cls_token_box, visual_bbox], dim=0)
-        
-        # Mở rộng theo batch size
-        visual_bbox = visual_bbox.repeat(bsz, 1, 1)
-        return visual_bbox.type(dtype)
+    def _calc_visual_bbox(self, device, dtype, bsz):  # , img_size=(14, 14), max_len=1000):
+        visual_bbox = self.visual_bbox.repeat(bsz, 1, 1)
+        visual_bbox = visual_bbox.to(device).type(dtype)
+        return visual_bbox
 
     def forward_image(self, x):
         if self.detection:
@@ -908,7 +883,7 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
         # attention_probs has shape bsz x n_heads x N x N
         # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
         # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
-        head_mask = [None] * self.config.num_hidden_layers
+        head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
         if not self.image_only:
             if bbox is None:
@@ -969,14 +944,7 @@ class LayoutLMv3Model(LayoutLMv3PreTrainedModel):
                 position_ids = position_ids.expand_as(input_ids)
                 final_position_ids = position_ids
 
-        if attention_mask.dim() == 3:
-            extended_attention_mask = attention_mask[:, None, :, :]
-        elif attention_mask.dim() == 2:
-            extended_attention_mask = attention_mask[:, None, None, :]
-        else:
-            raise ValueError(f"Wrong shape for attention_mask (shape {attention_mask.shape})")
-        extended_attention_mask = extended_attention_mask.to(dtype=self.dtype) # fp16 compatibility
-        extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, None, device)
 
         encoder_outputs = self.encoder(
             embedding_output,
